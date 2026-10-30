@@ -114,8 +114,23 @@ table.ed input,table.ed select{padding:3px 5px;font-size:12px}
 table.ed .n{width:200px}.ed .s{width:60px}.ed .m{width:92px}.ed .l{width:170px}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1d2330;color:#fff;padding:9px 18px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:50}
 #toast.show{opacity:1}
+.mode{font-size:12px;color:#b9c0cc}
+.mode.warn{color:#ffb38a}
+.modal{position:fixed;inset:0;background:rgba(20,24,33,.45);display:flex;align-items:center;justify-content:center;z-index:40}
+.modal .card{width:340px;margin:0}
 [hidden]{display:none!important}
+header h1,nav button,#authBtn,.mode{white-space:nowrap}
 @media (max-width:1100px){.build,.cal-layout{grid-template-columns:1fr}.side{position:static}}
+@media (max-width:700px){
+  header{gap:8px;padding:0 10px}
+  header h1{font-size:14px}
+  nav button{padding:14px 8px}
+  .mode{display:none}
+  main{padding:10px 8px 40px}
+  .day{min-height:64px;padding:3px 4px}
+  .day .pt{display:none}
+  .slots{grid-template-columns:repeat(3,1fr)}
+}
 </style>
 </head>
 <body>
@@ -126,7 +141,21 @@ table.ed .n{width:200px}.ed .s{width:60px}.ed .m{width:92px}.ed .l{width:170px}
     <button data-tab="cal">달력</button>
     <button data-tab="set">설정</button>
   </nav>
+  <span class="grow"></span>
+  <span id="modeBadge" class="mode"></span>
+  <button id="authBtn" class="btn sm" hidden></button>
 </header>
+<div id="loginModal" class="modal" hidden>
+  <form class="card" id="loginForm">
+    <h3>코치 로그인</h3>
+    <p class="hint" style="margin:0 0 8px">로그인하면 WOD 작성·설정 변경을 할 수 있습니다. 이 PC에 로그인이 유지됩니다.</p>
+    <input type="password" id="loginPw" placeholder="코치 비밀번호" autocomplete="current-password" style="width:100%">
+    <div class="row" style="margin-top:10px;justify-content:flex-end">
+      <button type="button" class="btn" id="loginCancel">취소</button>
+      <button type="submit" class="btn pri">로그인</button>
+    </div>
+  </form>
+</div>
 <main>
   <section id="tab-build"></section>
   <section id="tab-cal" hidden></section>
@@ -278,9 +307,95 @@ function load(){
   return defaultData();
 }
 let DB = load();
-function persist(){
+
+/* ================= 저장 (브라우저 / 서버) =================
+   Vercel 등 api/data 가 동작하는 곳에서는 서버에 저장(online), 그 외(GitHub Pages·파일)에서는 브라우저에 저장 */
+const PW_KEY = 'wodPlanner.coachPw';
+const MODE = {online:false, role:'coach', pw:'', storageMissing:false, serverEmpty:false, coachEnabled:false};
+const isCoach = ()=>MODE.role==='coach';
+const configOf = ()=>({version:DB.version, movements:DB.movements, equipment:DB.equipment, stretches:DB.stretches, settings:DB.settings});
+const lsGet = k=>{ try{ return localStorage.getItem(k); }catch(e){ return null; } };
+const lsSet = (k,v)=>{ try{ v==null ? localStorage.removeItem(k) : localStorage.setItem(k,v); }catch(e){} };
+function saveLocal(){
   try{ localStorage.setItem(KEY, JSON.stringify(DB)); }
   catch(e){ toast('브라우저 저장 실패: '+e.message); }
+}
+async function api(action,body){
+  let j = {};
+  try{
+    const r = await fetch('api/data?action='+action, {method:'POST',
+      headers:{'Content-Type':'application/json','X-Coach-Password':MODE.pw||''}, body:JSON.stringify(body||{})});
+    j = await r.json().catch(()=>({}));
+    if(!r.ok || !j.ok) throw new Error(j.error || 'HTTP '+r.status);
+  }catch(e){ toast('⚠ '+e.message); throw e; }
+  return j;
+}
+// 설정·동작 목록 변경 (연속 입력은 모아서 저장)
+function persist(){
+  if(!MODE.online) return saveLocal();
+  if(!isCoach()) return;
+  clearTimeout(persist._t);
+  persist._t = setTimeout(()=>api('config',{config:configOf()}).catch(()=>{}), 500);
+}
+async function syncProgram(date){
+  if(!MODE.online) return saveLocal();
+  await api('program',{date, program:DB.programs[date]||null});
+}
+async function syncAll(){
+  if(!MODE.online) return saveLocal();
+  await api('import',{config:configOf(), programs:DB.programs, logs:DB.logs});
+}
+function applyServer(j, logsOnly){
+  if(logsOnly){ DB.logs = j.logs||{}; return; }
+  DB = j.config ? migrate({...j.config, programs:j.programs||{}, logs:j.logs||{}}) : {...defaultData(), programs:j.programs||{}, logs:j.logs||{}};
+  MODE.serverEmpty = !j.config;
+  MODE.coachEnabled = !!j.coachEnabled;
+}
+async function fetchServer(){
+  const r = await fetch('api/data',{cache:'no-store'});
+  const j = await r.json();
+  return {r,j};
+}
+async function connect(){
+  try{
+    const {r,j} = await fetchServer();
+    if(r.ok && j.ok){
+      MODE.online = true; MODE.role = 'viewer';
+      applyServer(j);
+      const pw = lsGet(PW_KEY);
+      if(pw) await login(pw,true);
+    }else if(j && j.error==='storage-not-configured') MODE.storageMissing = true;
+  }catch(e){ /* api 없음 → 브라우저 저장 모드 */ }
+}
+async function login(pw, silent){
+  MODE.pw = pw;
+  try{ await api('login'); }
+  catch(e){ MODE.pw = ''; if(silent) lsSet(PW_KEY,null); return false; }
+  MODE.role = 'coach'; lsSet(PW_KEY,pw);
+  if(MODE.serverEmpty){
+    // 서버가 비어 있으면 이 브라우저의 기존 데이터를 올릴지 묻는다
+    let local = null;
+    try{ local = JSON.parse(lsGet(KEY)||'null'); }catch(e){}
+    const np = local ? Object.keys(local.programs||{}).length : 0, nl = local ? Object.keys(local.logs||{}).length : 0;
+    if((np||nl) && confirm(`서버가 비어 있습니다. 이 브라우저에 저장된 데이터(프로그램 ${np}개 · 기록 ${nl}개)를 서버로 올릴까요?`)) DB = migrate(local);
+    try{ await syncAll(); MODE.serverEmpty = false; }catch(e){}
+  }
+  return true;
+}
+function logout(){
+  MODE.role = 'viewer'; MODE.pw = ''; lsSet(PW_KEY,null);
+  renderAuth(); showTab('cal'); toast('로그아웃했습니다');
+}
+function renderAuth(){
+  const badge = $('#modeBadge'), btn = $('#authBtn');
+  document.querySelectorAll('nav [data-tab="build"],nav [data-tab="set"]').forEach(b=>b.hidden = !isCoach());
+  badge.classList.toggle('warn', MODE.storageMissing);
+  if(!MODE.online){
+    badge.textContent = MODE.storageMissing ? '⚠ 서버 저장소 미연결 · 이 브라우저에만 저장' : '이 브라우저에만 저장';
+    btn.hidden = true; return;
+  }
+  badge.textContent = isCoach() ? '코치 모드 · 서버 저장' : '보기 모드 · 인원수만 입력 가능';
+  btn.hidden = false; btn.textContent = isCoach() ? '로그아웃' : '코치 로그인';
 }
 
 /* ================= 유틸 ================= */
@@ -685,7 +800,7 @@ function onBind(path,val){
   refreshSide();
 }
 
-function saveProgram(){
+async function saveProgram(){
   const p = draft;
   if(!p.wod.lines.length && !p.core.lines.length){ toast('저장할 동작이 없습니다'); return; }
   const out = clone(p);
@@ -693,8 +808,10 @@ function saveProgram(){
   out.warnings = computeWarnings(out).warn.map(x=>x.text);
   out.text = buildText(out);
   out.savedAt = new Date().toISOString();
+  const prev = DB.programs[p.date];
   DB.programs[p.date] = out;
-  persist();
+  try{ await syncProgram(p.date); }
+  catch(e){ if(prev) DB.programs[p.date] = prev; else delete DB.programs[p.date]; return; }
   draft = clone(out); savedSnap = JSON.stringify(draft);
   refreshSide();
   toast(`${fmtDate(p.date)} 프로그램 저장됨 — 달력에 반영`);
@@ -830,14 +947,15 @@ function renderCal(){
       <div class="card">
         <h3>${fmtDate(sel)} <small>${sel}</small></h3>
         ${prog?`<pre class="out" style="max-height:340px">${esc(prog.text||buildText(prog))}</pre>
-          <div class="row"><button class="btn" data-act="copyDay">📋 복사</button><button class="btn" data-act="openDay">만들기에서 열기</button><span class="grow"></span><button class="btn ghost sm" data-act="delDay">프로그램 삭제</button></div>`
-        :`<p class="hint">저장된 프로그램이 없습니다.</p><button class="btn" data-act="openDay">이 날짜로 만들기</button>`}
+          <div class="row"><button class="btn" data-act="copyDay">📋 복사</button>${isCoach()?`<button class="btn" data-act="openDay">만들기에서 열기</button><span class="grow"></span><button class="btn ghost sm" data-act="delDay">프로그램 삭제</button>`:''}</div>`
+        :`<p class="hint">저장된 프로그램이 없습니다.</p>${isCoach()?'<button class="btn" data-act="openDay">이 날짜로 만들기</button>':''}`}
       </div>
       <div class="card">
-        <h3>운동 기록 <small>타임별 참석 인원 + 메모</small></h3>
-        <div class="slots">${slots.map(s=>`<label>${esc(s)}<input type="number" min="0" data-slot="${esc(s)}" value="${esc(log.counts?.[s]??'')}"></label>`).join('')}</div>
-        <textarea id="logMemo" rows="2" style="width:100%;margin-top:8px" placeholder="예: 19:50 18명, 로프 대기 생김">${esc(log.memo||'')}</textarea>
-        <div class="row" style="margin-top:6px"><button class="btn pri" data-act="saveLog">기록 저장</button></div>
+        <h3>운동 기록 <small>${isCoach()?'타임별 참석 인원 + 메모':'참석한 타임의 인원수를 입력해 주세요'}</small></h3>
+        <div class="slots">${slots.map(s=>`<label>${esc(s)}<input type="number" min="0" max="200" data-slot="${esc(s)}" value="${esc(log.counts?.[s]??'')}"></label>`).join('')}</div>
+        ${isCoach()?`<textarea id="logMemo" rows="2" style="width:100%;margin-top:8px" placeholder="예: 19:50 18명, 로프 대기 생김">${esc(log.memo||'')}</textarea>`
+          :(log.memo?`<p class="hint">코치 메모: ${esc(log.memo)}</p>`:'')}
+        <div class="row" style="margin-top:6px"><button class="btn pri" data-act="saveLog">${isCoach()?'기록 저장':'인원 저장'}</button></div>
       </div>
     </div>
   </div>
@@ -872,18 +990,28 @@ function bindCal(){
       case 'openDay':
         if(draft.date!==ui.calSel && isDirty() && !confirm('만들기 화면에 저장하지 않은 변경이 있습니다. 이동할까요?')) break;
         loadDate(ui.calSel); showTab('build'); break;
-      case 'delDay':
-        if(!confirm(`${fmtDate(ui.calSel)} 프로그램을 삭제할까요? (운동 기록은 남습니다)`)) break;
-        delete DB.programs[ui.calSel]; persist();
-        if(draft.date===ui.calSel) savedSnap = null;
+      case 'delDay': {
+        const d = ui.calSel, prev = DB.programs[d];
+        if(!confirm(`${fmtDate(d)} 프로그램을 삭제할까요? (운동 기록은 남습니다)`)) break;
+        delete DB.programs[d];
+        try{ await syncProgram(d); }catch(err){ DB.programs[d] = prev; break; }
+        if(draft.date===d) savedSnap = null;
         renderCal(); toast('삭제됨'); break;
+      }
       case 'saveLog': {
-        const counts = {};
-        root.querySelectorAll('[data-slot]').forEach(el=>{ counts[el.dataset.slot] = el.value; });
-        const memo = $('#logMemo').value;
-        if(Object.values(counts).every(v=>v==='') && !memo.trim()) delete DB.logs[ui.calSel];
-        else DB.logs[ui.calSel] = {counts, memo};
-        persist(); renderCal(); toast('운동 기록 저장됨'); break;
+        const d = ui.calSel, counts = {};
+        root.querySelectorAll('[data-slot]').forEach(el=>{ counts[el.dataset.slot] = el.value.trim(); });
+        const memoEl = $('#logMemo');
+        const memo = memoEl ? memoEl.value : (DB.logs[d]?.memo || '');
+        if(MODE.online){
+          try{ const j = await api('log',{date:d, log:{counts,memo}}); if(j.log) DB.logs[d] = j.log; else delete DB.logs[d]; }
+          catch(err){ break; }
+        }else{
+          if(Object.values(counts).every(v=>v==='') && !memo.trim()) delete DB.logs[d];
+          else DB.logs[d] = {counts, memo};
+          saveLocal();
+        }
+        renderCal(); toast(isCoach()?'운동 기록 저장됨':'인원 저장됨 — 감사합니다'); break;
       }
     }
   });
@@ -1023,20 +1151,26 @@ function bindSet(){
       case 'resetAll':
         if(!confirm('모든 데이터(프로그램·기록·설정)를 초기값으로 되돌릴까요? 먼저 백업을 내보내는 것을 권장합니다.')) break;
         if(!confirm('정말 초기화할까요? 되돌릴 수 없습니다.')) break;
-        DB = defaultData(); persist(); loadDate(addDays(todayStr(),1)); renderSet(); toast('초기화됨'); break;
+        DB = defaultData();
+        syncAll().then(()=>{ loadDate(addDays(todayStr(),1)); applyBoxName(); renderSet(); toast('초기화됨'); }).catch(()=>{});
+        break;
     }
   });
   $('#importFile').addEventListener('change',e=>{
     const file = e.target.files[0]; e.target.value = '';
     if(!file) return;
     const rd = new FileReader();
-    rd.onload = ()=>{
+    rd.onload = async ()=>{
+      let d;
       try{
-        const d = JSON.parse(rd.result);
+        d = JSON.parse(rd.result);
         if(!Array.isArray(d.movements) || typeof d.programs!=='object') throw new Error('WOD 플래너 백업 파일이 아닙니다');
-        if(!confirm(`백업을 불러오면 현재 데이터가 바뀝니다.\n(프로그램 ${Object.keys(d.programs).length}개 · 기록 ${Object.keys(d.logs||{}).length}개)\n계속할까요?`)) return;
-        DB = migrate(d); persist(); loadDate(draft.date); renderSet(); toast('백업 불러오기 완료');
-      }catch(err){ alert('불러오기 실패: '+err.message); }
+      }catch(err){ alert('불러오기 실패: '+err.message); return; }
+      if(!confirm(`백업을 불러오면 현재 데이터가 바뀝니다.\n(프로그램 ${Object.keys(d.programs).length}개 · 기록 ${Object.keys(d.logs||{}).length}개)\n계속할까요?`)) return;
+      const prev = DB;
+      DB = migrate(d);
+      try{ await syncAll(); }catch(err){ DB = prev; return; }
+      loadDate(draft.date); applyBoxName(); renderSet(); toast('백업 불러오기 완료');
     };
     rd.readAsText(file,'utf-8');
   });
@@ -1058,18 +1192,45 @@ function applyBoxName(){
   document.title = n ? `${n} WOD 플래너` : 'WOD 플래너';
 }
 function showTab(t){
+  if(!isCoach() && t!=='cal') t = 'cal';
   ui.tab = t;
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
   ['build','cal','set'].forEach(x=>$('#tab-'+x).hidden = x!==t);
-  if(t==='build') renderBuilder(); else if(t==='cal') renderCal(); else renderSet();
+  if(t==='build') renderBuilder(); else if(t==='cal'){ renderCal(); refreshCal(); } else renderSet();
   window.scrollTo(0,0);
+}
+// 달력을 열 때 다른 사람이 입력한 최신 인원·프로그램을 다시 받아온다
+async function refreshCal(){
+  if(!MODE.online) return;
+  try{
+    const {r,j} = await fetchServer();
+    if(!r.ok || !j.ok) return;
+    applyServer(j, isCoach());   // 코치는 편집 중인 설정을 지키기 위해 기록만 갱신
+    if(ui.tab==='cal') renderCal();
+  }catch(e){}
 }
 document.querySelector('nav').addEventListener('click',e=>{ const b=e.target.closest('[data-tab]'); if(b) showTab(b.dataset.tab); });
 window.addEventListener('beforeunload',e=>{ if(draft && isDirty()){ e.preventDefault(); e.returnValue=''; } });
+$('#authBtn').addEventListener('click',()=>{
+  if(isCoach()) return logout();
+  $('#loginModal').hidden = false; $('#loginPw').value = ''; $('#loginPw').focus();
+});
+$('#loginCancel').addEventListener('click',()=>{ $('#loginModal').hidden = true; });
+$('#loginForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const pw = $('#loginPw').value; if(!pw) return;
+  if(!(await login(pw))) return;
+  $('#loginModal').hidden = true;
+  applyBoxName(); loadDate(addDays(todayStr(),1)); renderAuth(); showTab('build');
+  toast('코치 모드로 로그인했습니다');
+});
 bindBuilder(); bindCal(); bindSet();
-applyBoxName();
-loadDate(addDays(todayStr(),1));
-showTab('build');
+(async ()=>{
+  await connect();
+  applyBoxName(); renderAuth();
+  loadDate(addDays(todayStr(),1));
+  showTab(isCoach() ? 'build' : 'cal');
+})();
 </script>
 </body>
 </html>
