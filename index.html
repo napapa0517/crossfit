@@ -99,9 +99,15 @@ pre.out{white-space:pre-wrap;word-break:break-word;background:#fbfbfc;border:1px
 table.t{width:100%;border-collapse:collapse;font-size:13px}
 table.t th,table.t td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left}
 table.t th{font-size:12px;color:var(--sub);font-weight:400}
-.slots{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
-.slots label{display:flex;flex-direction:column;font-size:12px;color:var(--sub)}
-.slots input{width:100%}
+.slotrow{border-top:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column;gap:6px}
+.slotrow:first-of-type{border-top:0}
+.slothead{display:flex;align-items:center;gap:10px}
+.slothead .cnt{font-size:12px;background:var(--ok-soft);color:var(--ok);border-radius:999px;padding:0 8px;font-weight:700}
+.slothead .cin{width:64px;margin-left:4px}
+.chip .x{border:0;background:none;color:var(--sub);padding:0 0 0 6px;font-size:11px}
+.chip .x:hover{color:var(--warn)}
+.nameform{display:flex;gap:6px}
+.nameform input{width:140px}
 
 /* settings */
 .set-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
@@ -129,7 +135,7 @@ header h1,nav button,#authBtn,.mode{white-space:nowrap}
   main{padding:10px 8px 40px}
   .day{min-height:64px;padding:3px 4px}
   .day .pt{display:none}
-  .slots{grid-template-columns:repeat(3,1fr)}
+  .nameform input{flex:1;width:auto}
 }
 </style>
 </head>
@@ -915,7 +921,7 @@ function renderCal(){
 
   // 타임별 통계
   const stats = slots.map(s=>{
-    const v = Object.values(DB.logs).map(l=>l.counts?.[s]).filter(x=>x!==''&&x!=null&&isFinite(+x)).map(Number);
+    const v = Object.values(DB.logs).map(l=>effCount(l,s)).filter(x=>x!=null);
     return {s, n:v.length, max:v.length?Math.max(...v):null, avg:v.length?(v.reduce((a,b)=>a+b,0)/v.length):null};
   });
   const obsMax = Math.max(0,...stats.map(s=>s.max||0));
@@ -933,7 +939,7 @@ function renderCal(){
         ${WD.map(d=>`<div class="wd">${d}</div>`).join('')}
         ${cells.map(d=>{
           const p = DB.programs[d], lg = DB.logs[d];
-          const tot = lg ? Object.values(lg.counts||{}).reduce((a,b)=>a+(+b||0),0) : 0;
+          const tot = lg ? slots.reduce((a,s)=>a+(effCount(lg,s)||0),0) : 0;
           return `<button class="day ${+d.slice(5,7)!==mo?'out':''} ${d===sel?'sel':''} ${d===t?'today':''}" data-act="selDay" data-d="${d}">
             <span class="dn">${+d.slice(8)}</span>
             ${p&&p.wod.lines.length?`<span class="fmt">${esc(p.wod.format)}</span>`:''}
@@ -951,11 +957,19 @@ function renderCal(){
         :`<p class="hint">저장된 프로그램이 없습니다.</p>${isCoach()?'<button class="btn" data-act="openDay">이 날짜로 만들기</button>':''}`}
       </div>
       <div class="card">
-        <h3>운동 기록 <small>${isCoach()?'타임별 참석 인원 + 메모':'참석한 타임의 인원수를 입력해 주세요'}</small></h3>
-        <div class="slots">${slots.map(s=>`<label>${esc(s)}<input type="number" min="0" max="200" data-slot="${esc(s)}" value="${esc(log.counts?.[s]??'')}"></label>`).join('')}</div>
-        ${isCoach()?`<textarea id="logMemo" rows="2" style="width:100%;margin-top:8px" placeholder="예: 19:50 18명, 로프 대기 생김">${esc(log.memo||'')}</textarea>`
+        <h3>타임별 참석 <small>참석할 타임에 이름을 적어 주세요</small></h3>
+        ${slots.map(s=>{
+          const names = log.names?.[s] || [], n = effCount(log,s);
+          return `<div class="slotrow">
+            <div class="slothead"><b>${esc(s)}</b><span class="cnt">${n==null?'0명':n+'명'}</span>
+              ${isCoach()?`<label class="hint" style="margin:0">직접 입력 <input type="number" min="0" max="200" class="cin" data-slot="${esc(s)}" value="${esc(log.counts?.[s]??'')}" placeholder="${names.length}"></label>`:''}</div>
+            <div class="chips">${names.map(nm=>`<span class="chip">${esc(nm)}${isCoach()||isMine(sel,s,nm)?`<button class="x" data-act="rmName" data-s="${esc(s)}" data-n="${esc(nm)}" title="빼기">✕</button>`:''}</span>`).join('')}</div>
+            <form class="nameform" data-s="${esc(s)}"><input maxlength="20" placeholder="이름" value="${isCoach()?'':esc(myName())}"><button class="btn sm">추가</button></form>
+          </div>`;}).join('')}
+        ${isCoach()?`<p class="hint">직접 입력을 비워 두면 이름 수가 인원이 됩니다.</p>
+          <textarea id="logMemo" rows="2" style="width:100%;margin-top:8px" placeholder="예: 19:50 18명, 로프 대기 생김">${esc(log.memo||'')}</textarea>
+          <div class="row" style="margin-top:6px"><button class="btn pri" data-act="saveLog">인원·메모 저장</button></div>`
           :(log.memo?`<p class="hint">코치 메모: ${esc(log.memo)}</p>`:'')}
-        <div class="row" style="margin-top:6px"><button class="btn pri" data-act="saveLog">${isCoach()?'기록 저장':'인원 저장'}</button></div>
       </div>
     </div>
   </div>
@@ -976,8 +990,48 @@ function renderCal(){
     </div>
   </div>`;
 }
+/* 타임별 참석 신청: 이름 목록, 이 브라우저에서 넣은 이름만 회원이 뺄 수 있음 */
+const MINE_KEY = 'wodPlanner.mine', NAME_KEY = 'wodPlanner.myName';
+const myName = ()=>lsGet(NAME_KEY) || '';
+function mineSet(){ try{ return JSON.parse(lsGet(MINE_KEY)||'{}'); }catch(e){ return {}; } }
+const mineKey = (d,s,n)=>`${d}|${s}|${n.toLowerCase()}`;
+const isMine = (d,s,n)=>!!mineSet()[mineKey(d,s,n)];
+function markMine(d,s,n,on){ const m = mineSet(); if(on) m[mineKey(d,s,n)] = 1; else delete m[mineKey(d,s,n)]; lsSet(MINE_KEY,JSON.stringify(m)); }
+// 코치가 직접 입력한 인원이 있으면 그 값, 없으면 신청한 이름 수
+function effCount(log,s){
+  const c = log?.counts?.[s];
+  if(c!==''&&c!=null&&isFinite(+c)) return +c;
+  const n = log?.names?.[s]?.length || 0;
+  return n || null;
+}
+function setLog(d,log){ if(log) DB.logs[d] = log; else delete DB.logs[d]; }
+async function signup(d,s,name,remove){
+  if(MODE.online){
+    setLog(d,(await api('signup',{date:d, slot:s, name, remove:!!remove})).log);
+  }else{
+    const log = DB.logs[d] || {counts:{},names:{},memo:''};
+    const names = {...(log.names||{})};
+    names[s] = (names[s]||[]).filter(x=>x.toLowerCase()!==name.toLowerCase());
+    if(!remove) names[s].push(name);
+    const empty = Object.values(log.counts||{}).every(v=>v==='') && Object.values(names).every(l=>!l.length) && !(log.memo||'').trim();
+    setLog(d, empty ? null : {...log, names});
+    saveLocal();
+  }
+  markMine(d,s,name,!remove);
+}
 function bindCal(){
   const root = $('#tab-cal');
+  root.addEventListener('submit',async e=>{
+    const f = e.target.closest('.nameform'); if(!f) return;
+    e.preventDefault();
+    const name = f.querySelector('input').value.replace(/\s+/g,' ').trim();
+    if(!name || name.length>20){ toast('이름을 1~20자로 입력해 주세요'); return; }
+    const s = f.dataset.s, log = DB.logs[ui.calSel];
+    if((log?.names?.[s]||[]).some(x=>x.toLowerCase()===name.toLowerCase())){ toast(`${s} 타임에 이미 '${name}'이(가) 있습니다`); return; }
+    try{ await signup(ui.calSel,s,name,false); }catch(err){ return; }
+    if(!isCoach()) lsSet(NAME_KEY,name);
+    renderCal(); toast(`${s} 타임 신청 완료 — ${name}`);
+  });
   root.addEventListener('click',async e=>{
     const b = e.target.closest('[data-act]'); if(!b) return;
     const [y,m] = (ui.calMonth||todayStr().slice(0,7)).split('-').map(Number);
@@ -1000,18 +1054,20 @@ function bindCal(){
       }
       case 'saveLog': {
         const d = ui.calSel, counts = {};
-        root.querySelectorAll('[data-slot]').forEach(el=>{ counts[el.dataset.slot] = el.value.trim(); });
-        const memoEl = $('#logMemo');
-        const memo = memoEl ? memoEl.value : (DB.logs[d]?.memo || '');
+        root.querySelectorAll('.cin[data-slot]').forEach(el=>{ counts[el.dataset.slot] = el.value.trim(); });
+        const memo = $('#logMemo').value;
         if(MODE.online){
-          try{ const j = await api('log',{date:d, log:{counts,memo}}); if(j.log) DB.logs[d] = j.log; else delete DB.logs[d]; }
-          catch(err){ break; }
+          try{ setLog(d,(await api('log',{date:d, log:{counts,memo}})).log); }catch(err){ break; }
         }else{
-          if(Object.values(counts).every(v=>v==='') && !memo.trim()) delete DB.logs[d];
-          else DB.logs[d] = {counts, memo};
-          saveLocal();
+          setLog(d,{counts, names:DB.logs[d]?.names||{}, memo}); saveLocal();
         }
-        renderCal(); toast(isCoach()?'운동 기록 저장됨':'인원 저장됨 — 감사합니다'); break;
+        renderCal(); toast('인원·메모 저장됨'); break;
+      }
+      case 'rmName': {
+        const s = b.dataset.s, n = b.dataset.n;
+        if(!confirm(`${s} 타임에서 '${n}'을(를) 뺄까요?`)) break;
+        try{ await signup(ui.calSel,s,n,true); }catch(err){ break; }
+        renderCal(); toast('신청을 취소했습니다'); break;
       }
     }
   });

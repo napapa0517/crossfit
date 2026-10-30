@@ -1,7 +1,8 @@
 // Vercel 서버리스 함수: 공유 데이터 저장소 (Upstash Redis REST API)
 // 환경변수: KV_REST_API_URL / KV_REST_API_TOKEN (또는 UPSTASH_REDIS_REST_URL / _TOKEN), COACH_PASSWORD
 //   GET                      → 설정·프로그램·운동 기록 전체 (누구나)
-//   POST ?action=log         → 운동 기록 저장 (누구나: 타임별 인원만 / 코치: 메모 포함)
+//   POST ?action=signup      → 타임별 참석 신청: 자기 이름 추가/빼기 (누구나)
+//   POST ?action=log         → 타임별 인원 직접 입력값·메모 저장 (코치)
 //   POST ?action=login       → 코치 비밀번호 확인
 //   POST ?action=config      → 설정·동작 목록 저장 (코치)
 //   POST ?action=program     → 하루 프로그램 저장·삭제 (코치)
@@ -14,6 +15,7 @@ const COACH_PASSWORD = process.env.COACH_PASSWORD || '';
 const K = {config:'wod:config', programs:'wod:programs', logs:'wod:logs'};
 const DEFAULT_SLOTS = ['06:30','17:30','18:40','19:50','21:00'];
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_NAMES = 60;
 
 async function redis(cmds){
   const r = await fetch(REDIS_URL.replace(/\/$/,'')+'/pipeline', {
@@ -36,6 +38,22 @@ function isCoach(req){
   const a = Buffer.from(String(req.headers['x-coach-password']||''));
   const b = Buffer.from(COACH_PASSWORD);
   return a.length===b.length && crypto.timingSafeEqual(a,b);
+}
+function cleanName(v){
+  const s = String(v||'').replace(/[\u0000-\u001f<>]/g,'').replace(/\s+/g,' ').trim();
+  return s.length>=1 && s.length<=20 ? s : '';
+}
+async function loadLog(date){
+  const [prevRaw,cfgRaw] = await redis([['HGET',K.logs,date],['GET',K.config]]);
+  return {
+    prev: prevRaw ? JSON.parse(prevRaw) : {counts:{},names:{},memo:''},
+    slots: (cfgRaw && JSON.parse(cfgRaw).settings?.slots) || DEFAULT_SLOTS
+  };
+}
+async function saveLog(date,log){
+  const empty = Object.values(log.counts).every(v=>v==='') && Object.values(log.names).every(l=>!l.length) && !log.memo.trim();
+  await redis([empty ? ['HDEL',K.logs,date] : ['HSET',K.logs,date,JSON.stringify(log)]]);
+  return empty ? null : log;
 }
 function hsetCmd(key,obj){
   const args = [];
@@ -61,13 +79,31 @@ module.exports = async (req,res)=>{
       return isCoach(req) ? send(200,{ok:true}) : send(401,{ok:false,error:'비밀번호가 틀렸습니다'});
     }
 
+    if(action==='signup'){
+      // 회원: 타임에 자기 이름 추가/빼기 (메모·인원 직접 입력값은 그대로)
+      const {date,slot,remove} = body;
+      const name = cleanName(body.name);
+      if(!DATE.test(date||'')) return send(400,{ok:false,error:'날짜 형식 오류'});
+      if(!name) return send(400,{ok:false,error:'이름을 1~20자로 입력해 주세요'});
+      const {prev,slots} = await loadLog(date);
+      if(!slots.includes(slot)) return send(400,{ok:false,error:'없는 타임입니다'});
+      const names = {...(prev.names||{})};
+      const list = (names[slot]||[]).filter(n=>n.toLowerCase()!==name.toLowerCase());
+      if(!remove){
+        if(list.length>=MAX_NAMES) return send(400,{ok:false,error:`${slot} 타임 신청 인원이 가득 찼습니다`});
+        list.push(name);
+      }
+      names[slot] = list;
+      return send(200,{ok:true, log:await saveLog(date,{counts:prev.counts||{}, names, memo:prev.memo||''})});
+    }
+
+    if(!isCoach(req)) return send(401,{ok:false,error:'코치 로그인이 필요합니다'});
+
     if(action==='log'){
+      // 코치: 타임별 인원 직접 입력값 + 메모 (회원 이름 목록은 그대로)
       const {date,log} = body;
       if(!DATE.test(date||'')) return send(400,{ok:false,error:'날짜 형식 오류'});
-      const coach = isCoach(req);
-      const [prevRaw,cfgRaw] = await redis([['HGET',K.logs,date],['GET',K.config]]);
-      const prev = prevRaw ? JSON.parse(prevRaw) : {counts:{},memo:''};
-      const slots = (cfgRaw && JSON.parse(cfgRaw).settings?.slots) || DEFAULT_SLOTS;
+      const {prev,slots} = await loadLog(date);
       const counts = {};
       for(const s of slots){
         const v = log?.counts?.[s];
@@ -76,15 +112,9 @@ module.exports = async (req,res)=>{
         if(!Number.isInteger(n) || n<0 || n>200) return send(400,{ok:false,error:`${s} 인원 값이 올바르지 않습니다`});
         counts[s] = String(n);
       }
-      // 회원은 인원수만 바꿀 수 있고 메모는 기존 값을 유지
-      const memo = coach ? String(log?.memo||'').slice(0,1000) : (prev.memo||'');
-      const empty = Object.values(counts).every(v=>v==='') && !memo.trim();
-      const next = {counts,memo};
-      await redis([empty ? ['HDEL',K.logs,date] : ['HSET',K.logs,date,JSON.stringify(next)]]);
-      return send(200,{ok:true, log:empty?null:next});
+      const memo = String(log?.memo||'').slice(0,1000);
+      return send(200,{ok:true, log:await saveLog(date,{counts, names:prev.names||{}, memo})});
     }
-
-    if(!isCoach(req)) return send(401,{ok:false,error:'코치 로그인이 필요합니다'});
 
     if(action==='config'){
       if(!body.config || !Array.isArray(body.config.movements)) return send(400,{ok:false,error:'설정 형식 오류'});
