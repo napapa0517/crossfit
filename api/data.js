@@ -9,8 +9,10 @@
 //   POST ?action=import      → 전체 덮어쓰기: 백업 불러오기·초기화 (코치)
 const crypto = require('crypto');
 
-const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
-const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+// Vercel에서 Redis를 연결할 때 접두어를 바꿔도 찾을 수 있게 *_REST_API_URL / *_REST_API_TOKEN 도 확인
+const envFind = re=>{ const k = Object.keys(process.env).find(k=>re.test(k)); return k ? process.env[k] : ''; };
+const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || envFind(/_REST_API_URL$/) || envFind(/_REDIS_REST_URL$/);
+const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || envFind(/_REST_API_TOKEN$/) || envFind(/_REDIS_REST_TOKEN$/);
 const COACH_PASSWORD = process.env.COACH_PASSWORD || '';
 const K = {config:'wod:config', programs:'wod:programs', logs:'wod:logs'};
 const DEFAULT_SLOTS = ['06:30','17:30','18:40','19:50','21:00'];
